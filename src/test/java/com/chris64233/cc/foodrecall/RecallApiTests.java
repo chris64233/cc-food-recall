@@ -57,6 +57,13 @@ class RecallApiTests extends TestSupport {
                 .andExpect(status().isOk());
     }
 
+    private void close(String recallNumber, String closeNumber) throws Exception {
+        mockMvc.perform(post("/api/recalls/" + recallNumber + "/close")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"closeNumber\":\"" + closeNumber + "\",\"approvedBy\":\"qa-lead\"}"))
+                .andExpect(status().isOk());
+    }
+
     private void assertQuarantined(String lot, boolean expected) throws Exception {
         mockMvc.perform(get("/api/lots/" + lot))
                 .andExpect(jsonPath("$.quarantined").value(expected));
@@ -98,13 +105,11 @@ class RecallApiTests extends TestSupport {
                 .andExpect(jsonPath("$.quarantined").value(true))
                 .andExpect(jsonPath("$.recallReasons.length()").value(2));
 
-        mockMvc.perform(post("/api/recalls/R-1/close"))
-                .andExpect(status().isOk())
+        close("R-1", "C-R1");
+        mockMvc.perform(get("/api/recalls/R-1/effectiveness"))
                 .andExpect(jsonPath("$.status").value("CLOSED"));
         // 再次关闭幂等
-        mockMvc.perform(post("/api/recalls/R-1/close"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("CLOSED"));
+        close("R-1", "C-R1");
 
         assertQuarantined("A", false);
         assertQuarantined("E", false);
@@ -118,7 +123,7 @@ class RecallApiTests extends TestSupport {
                     .andExpect(jsonPath("$.recallReasons[0].recallNumber").value("R-2"));
         }
 
-        mockMvc.perform(post("/api/recalls/R-2/close")).andExpect(status().isOk());
+        close("R-2", "C-R2");
         for (String lot : new String[]{"A", "B", "C", "D", "E", "F"}) {
             assertQuarantined(lot, false);
         }
@@ -159,7 +164,9 @@ class RecallApiTests extends TestSupport {
         mockMvc.perform(post("/api/recalls").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"recallNumber\":\"R-5\",\"lotNumber\":\"GHOST\",\"reason\":\"x\"}"))
                 .andExpect(status().isNotFound());
-        mockMvc.perform(post("/api/recalls/R-9/close"))
+        mockMvc.perform(post("/api/recalls/R-9/close")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"closeNumber\":\"C-R9\",\"approvedBy\":\"qa-lead\"}"))
                 .andExpect(status().isNotFound());
     }
 }

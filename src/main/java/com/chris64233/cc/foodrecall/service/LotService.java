@@ -2,6 +2,7 @@ package com.chris64233.cc.foodrecall.service;
 
 import com.chris64233.cc.foodrecall.domain.Lot;
 import com.chris64233.cc.foodrecall.domain.RecallImpact;
+import com.chris64233.cc.foodrecall.domain.RecallStatus;
 import com.chris64233.cc.foodrecall.error.ApiException;
 import com.chris64233.cc.foodrecall.repository.LotRepository;
 import com.chris64233.cc.foodrecall.repository.RecallImpactRepository;
@@ -65,7 +66,9 @@ public class LotService {
     public LotResponse getLot(String lotNumber) {
         Lot lot = lotRepository.findByLotNumber(lotNumber)
                 .orElseThrow(() -> ApiException.notFound("批次不存在: " + lotNumber));
-        List<RecallReasonView> reasons = impactRepository.findByLot(lot).stream()
+        // 影响清单在召回关闭后仍然保留，但批次视图只展示进行中的召回原因
+        List<RecallReasonView> reasons = impactRepository
+                .findByLotAndRecall_Status(lot, RecallStatus.OPEN).stream()
                 .map(impact -> new RecallReasonView(impact.getRecall().getRecallNumber(), impact.getReason()))
                 .toList();
         return toResponse(lot, reasons);

@@ -9,6 +9,7 @@ import com.chris64233.cc.foodrecall.domain.TransformationInput;
 import com.chris64233.cc.foodrecall.domain.TransformationOutput;
 import com.chris64233.cc.foodrecall.error.ApiException;
 import com.chris64233.cc.foodrecall.repository.LotRepository;
+import com.chris64233.cc.foodrecall.repository.RecallEventRepository;
 import com.chris64233.cc.foodrecall.repository.RecallImpactRepository;
 import com.chris64233.cc.foodrecall.repository.TransformationInputRepository;
 import com.chris64233.cc.foodrecall.repository.TransformationOutputRepository;
@@ -16,11 +17,14 @@ import com.chris64233.cc.foodrecall.repository.TransformationRepository;
 import com.chris64233.cc.foodrecall.web.Dtos.LotAmount;
 import com.chris64233.cc.foodrecall.web.Dtos.TransformRequest;
 import com.chris64233.cc.foodrecall.web.Dtos.TransformResponse;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -37,19 +41,25 @@ public class TransformationService {
     private final TransformationInputRepository inputRepository;
     private final TransformationOutputRepository outputRepository;
     private final RecallImpactRepository impactRepository;
+    private final RecallEventRepository recallRepository;
     private final Transactions transactions;
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     public TransformationService(LotRepository lotRepository,
                                  TransformationRepository transformationRepository,
                                  TransformationInputRepository inputRepository,
                                  TransformationOutputRepository outputRepository,
                                  RecallImpactRepository impactRepository,
+                                 RecallEventRepository recallRepository,
                                  Transactions transactions) {
         this.lotRepository = lotRepository;
         this.transformationRepository = transformationRepository;
         this.inputRepository = inputRepository;
         this.outputRepository = outputRepository;
         this.impactRepository = impactRepository;
+        this.recallRepository = recallRepository;
         this.transactions = transactions;
     }
 
@@ -142,12 +152,22 @@ public class TransformationService {
                 .map(RecallImpact::getRecall)
                 .filter(recall -> recall.getStatus() == RecallStatus.OPEN)
                 .distinct()
+                .sorted(Comparator.comparing(RecallEvent::getId))
                 .toList();
-        for (Lot output : outputLots) {
-            for (RecallEvent recall : openRecalls) {
-                impactRepository.save(new RecallImpact(recall, output, recall.getReason()));
+        for (RecallEvent recall : openRecalls) {
+            // 与关闭/发货共用同一锁顺序（先批次后召回），取得召回行锁后
+            // 影响清单的追加才对并发关闭可见，统计版本递增才会使旧关闭决定失效
+            RecallEvent locked = recallRepository.findForUpdateByRecallNumber(recall.getRecallNumber())
+                    .orElseThrow(() -> ApiException.notFound("召回事件不存在: " + recall.getRecallNumber()));
+            entityManager.refresh(locked);
+            if (locked.getStatus() != RecallStatus.OPEN) {
+                continue;
+            }
+            for (Lot output : outputLots) {
+                impactRepository.save(new RecallImpact(locked, output, locked.getReason()));
                 output.setQuarantined(true);
             }
+            locked.bumpStatsVersion();
         }
     }
 

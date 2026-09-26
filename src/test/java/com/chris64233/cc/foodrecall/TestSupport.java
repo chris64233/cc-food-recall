@@ -15,6 +15,9 @@ abstract class TestSupport {
 
     @BeforeEach
     void cleanDatabase() {
+        jdbcTemplate.update("DELETE FROM recall_reports");
+        jdbcTemplate.update("DELETE FROM recall_notifications");
+        jdbcTemplate.update("DELETE FROM shipments");
         jdbcTemplate.update("DELETE FROM recall_impacts");
         jdbcTemplate.update("DELETE FROM transformation_inputs");
         jdbcTemplate.update("DELETE FROM transformation_outputs");
