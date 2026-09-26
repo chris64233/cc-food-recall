@@ -7,6 +7,8 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 
 public interface RecallEventRepository extends JpaRepository<RecallEvent, Long> {
@@ -16,4 +18,8 @@ public interface RecallEventRepository extends JpaRepository<RecallEvent, Long> 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select r from RecallEvent r where r.recallNumber = :recallNumber")
     Optional<RecallEvent> findForUpdateByRecallNumber(@Param("recallNumber") String recallNumber);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select r from RecallEvent r where r.id in :ids order by r.id")
+    List<RecallEvent> findForUpdateByIdIn(@Param("ids") Collection<Long> ids);
 }

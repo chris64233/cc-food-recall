@@ -9,6 +9,7 @@ import com.chris64233.cc.foodrecall.domain.TransformationInput;
 import com.chris64233.cc.foodrecall.domain.TransformationOutput;
 import com.chris64233.cc.foodrecall.error.ApiException;
 import com.chris64233.cc.foodrecall.repository.LotRepository;
+import com.chris64233.cc.foodrecall.repository.RecallEventRepository;
 import com.chris64233.cc.foodrecall.repository.RecallImpactRepository;
 import com.chris64233.cc.foodrecall.repository.TransformationInputRepository;
 import com.chris64233.cc.foodrecall.repository.TransformationOutputRepository;
@@ -19,6 +20,7 @@ import com.chris64233.cc.foodrecall.web.Dtos.TransformResponse;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -37,6 +39,8 @@ public class TransformationService {
     private final TransformationInputRepository inputRepository;
     private final TransformationOutputRepository outputRepository;
     private final RecallImpactRepository impactRepository;
+    private final RecallEventRepository recallRepository;
+    private final RecallService recallService;
     private final Transactions transactions;
 
     public TransformationService(LotRepository lotRepository,
@@ -44,12 +48,16 @@ public class TransformationService {
                                  TransformationInputRepository inputRepository,
                                  TransformationOutputRepository outputRepository,
                                  RecallImpactRepository impactRepository,
+                                 RecallEventRepository recallRepository,
+                                 RecallService recallService,
                                  Transactions transactions) {
         this.lotRepository = lotRepository;
         this.transformationRepository = transformationRepository;
         this.inputRepository = inputRepository;
         this.outputRepository = outputRepository;
         this.impactRepository = impactRepository;
+        this.recallRepository = recallRepository;
+        this.recallService = recallService;
         this.transactions = transactions;
     }
 
@@ -68,9 +76,20 @@ public class TransformationService {
             return toResponse(stored);
         }
 
-        List<Lot> inputs = lockInputs(validated);
+        List<String> inputNumbers = new ArrayList<>(new TreeSet<>(validated.inputs().keySet()));
+        List<Lot> inputs = lockInputs(inputNumbers, validated);
         ensureOutputsAbsent(validated);
         ensureNoCycle(inputs, validated.outputs().keySet());
+
+        // 先锁定受影响的进行中召回行（按 id 排序），与召回报告/关闭协调加锁顺序；
+        // 转换持有召回锁期间追加影响清单并推进统计版本，使基于旧统计的关闭决定失效。
+        List<Long> recallIds = impactRepository.findByLotIn(inputs).stream()
+                .map(impact -> impact.getRecall().getId())
+                .distinct().sorted().toList();
+        List<RecallEvent> openRecalls = recallIds.isEmpty()
+                ? List.of() : recallRepository.findForUpdateByIdIn(recallIds).stream()
+                        .filter(recall -> recall.getStatus() == RecallStatus.OPEN)
+                        .toList();
 
         Transformation transformation = transformationRepository.save(
                 new Transformation(validated.transformationId(), validated.loss(), Instant.now()));
@@ -89,12 +108,11 @@ public class TransformationService {
             outputLots.add(output);
         }
 
-        propagateRecalls(inputs, outputLots);
+        propagateRecalls(openRecalls, inputs, outputLots, validated);
         return toResponse(transformation);
     }
 
-    private List<Lot> lockInputs(Validated validated) {
-        List<String> numbers = new ArrayList<>(new TreeSet<>(validated.inputs().keySet()));
+    private List<Lot> lockInputs(List<String> numbers, Validated validated) {
         List<Lot> locked = lotRepository.findForUpdateByLotNumberIn(numbers);
         if (locked.size() != numbers.size()) {
             Set<String> found = locked.stream().map(Lot::getLotNumber).collect(Collectors.toSet());
@@ -114,7 +132,8 @@ public class TransformationService {
     private void ensureOutputsAbsent(Validated validated) {
         List<Lot> conflicts = lotRepository.findByLotNumberIn(validated.outputs().keySet());
         if (!conflicts.isEmpty()) {
-            String names = conflicts.stream().map(Lot::getLotNumber).sorted().collect(Collectors.joining(", "));
+            String names = conflicts.stream().map(Lot::getLotNumber).sorted()
+                    .collect(Collectors.joining(", "));
             throw ApiException.conflict("输出批次编号已存在: " + names);
         }
     }
@@ -137,17 +156,40 @@ public class TransformationService {
         }
     }
 
-    private void propagateRecalls(List<Lot> inputs, List<Lot> outputLots) {
-        List<RecallEvent> openRecalls = impactRepository.findByLotIn(inputs).stream()
-                .map(RecallImpact::getRecall)
-                .filter(recall -> recall.getStatus() == RecallStatus.OPEN)
-                .distinct()
-                .toList();
-        for (Lot output : outputLots) {
-            for (RecallEvent recall : openRecalls) {
-                impactRepository.save(new RecallImpact(recall, output, recall.getReason()));
-                output.setQuarantined(true);
+    /**
+     * 将进行中的召回追加到新输出批次：为每个召回计算各输出批次的根批次归因比例
+     * （多路径汇合在比例层面相加，数量不重复计量），并追加影响清单与通知。
+     */
+    private void propagateRecalls(List<RecallEvent> openRecalls, List<Lot> inputs,
+                                  List<Lot> outputLots, Validated validated) {
+        if (openRecalls.isEmpty()) {
+            return;
+        }
+        BigDecimal outputTotal = validated.outputs().values().stream()
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        for (RecallEvent recall : openRecalls) {
+            // 输入批次的归因比例：已在该召回清单中的输入按其既有比例，否则为 0。
+            Map<String, BigDecimal> inputFractions = new LinkedHashMap<>();
+            for (Lot input : inputs) {
+                BigDecimal fraction = impactRepository.findByRecallAndLot(recall, input)
+                        .map(RecallImpact::getRootFraction)
+                        .orElse(BigDecimal.ZERO);
+                inputFractions.put(input.getLotNumber(), fraction);
             }
+            BigDecimal contaminated = BigDecimal.ZERO;
+            for (Map.Entry<String, BigDecimal> entry : validated.inputs().entrySet()) {
+                contaminated = contaminated.add(
+                        entry.getValue().multiply(inputFractions.get(entry.getKey())));
+            }
+            BigDecimal mixture = outputTotal.signum() == 0
+                    ? BigDecimal.ZERO
+                    : contaminated.divide(outputTotal, 6, RoundingMode.HALF_UP);
+
+            Map<Lot, BigDecimal> outputFractions = new LinkedHashMap<>();
+            for (Lot output : outputLots) {
+                outputFractions.put(output, mixture.min(BigDecimal.ONE));
+            }
+            recallService.appendNewOutputs(recall, outputFractions, Instant.now());
         }
     }
 

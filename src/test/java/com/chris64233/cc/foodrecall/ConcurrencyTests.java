@@ -13,7 +13,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -41,16 +40,11 @@ class ConcurrencyTests {
     private LotRepository lotRepository;
 
     @Autowired
-    private JdbcTemplate jdbcTemplate;
+    private DatabaseCleaner databaseCleaner;
 
     @BeforeEach
     void cleanDatabase() {
-        jdbcTemplate.update("DELETE FROM recall_impacts");
-        jdbcTemplate.update("DELETE FROM transformation_inputs");
-        jdbcTemplate.update("DELETE FROM transformation_outputs");
-        jdbcTemplate.update("DELETE FROM recall_events");
-        jdbcTemplate.update("DELETE FROM transformations");
-        jdbcTemplate.update("DELETE FROM lots");
+        databaseCleaner.clean();
     }
 
     @Test
@@ -77,8 +71,10 @@ class ConcurrencyTests {
         assertThat(conflicts.get()).isEqualTo(1);
         assertThat(lotRepository.findByLotNumber("A").orElseThrow().getQuantity())
                 .isEqualByComparingTo("40.000");
-        assertThat(lotRepository.findByLotNumber("B-0")).isPresent();
-        assertThat(lotRepository.findByLotNumber("B-1")).isEmpty();
+        // 两个并发转换谁先抢到锁并不确定，恰好一个输出批次被创建。
+        boolean b0 = lotRepository.findByLotNumber("B-0").isPresent();
+        boolean b1 = lotRepository.findByLotNumber("B-1").isPresent();
+        assertThat(b0 ^ b1).as("恰好一个输出批次被创建 (B-0=%s, B-1=%s)", b0, b1).isTrue();
     }
 
     @Test
